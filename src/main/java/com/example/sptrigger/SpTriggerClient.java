@@ -6,35 +6,25 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity; // Если ошибка - замени на LocalPlayer
 import net.minecraft.network.chat.Component;
-import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.world.InteractionHand;
-import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 
-/**
- * Тестовый триггербот. РАБОТАЕТ ТОЛЬКО В ОДИНОЧНОМ МИРЕ (встроенный сервер, один игрок, без LAN).
- * Управление: клиентская команда /sptrigger (вкл/выкл), /sptrigger mobs (цели: игроки <-> любые живые).
- */
 public class SpTriggerClient implements ClientModInitializer {
     /** Шанс намеренного промаха на каждую возможность удара. */
-    private static final double MISS_CHANCE = 0.001;
+    private static final double MISS_CHANCE = 0.01; 
     /** Случайная задержка перед ударом (в тиках) после готовности. */
     private static final int MAX_HIT_DELAY = 2;
-    /** Случайная пауза после приземления перед новым прыжком (в тиках). */
-    private static final int MAX_JUMP_DELAY = 3;
 
     private boolean enabled = false;
     private boolean targetMobs = false;
 
-    private boolean jumpHeld = false;
-    private int jumpDelay = -1;
     private int hitDelay = -1;
     private boolean missPlanned = false;
 
@@ -43,127 +33,100 @@ public class SpTriggerClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
 
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
-            dispatcher.register(ClientCommandManager.literal("sptrigger")
+            dispatcher.register(ClientCommandManager.literal("sptrg")
                 .executes(ctx -> {
                     enabled = !enabled;
                     ctx.getSource().sendFeedback(Component.literal(
-                        "SP Trigger: " + (enabled ? "ВКЛ" : "ВЫКЛ") + " (только одиночный мир)"));
+                        "SP Trigger: " + (enabled ? "ВКЛ" : "ВЫКЛ"))); // Убрал упоминание одиночной игры
                     return Command.SINGLE_SUCCESS;
                 })
                 .then(ClientCommandManager.literal("mobs").executes(ctx -> {
                     targetMobs = !targetMobs;
                     ctx.getSource().sendFeedback(Component.literal(
-                        "SP Trigger: цели = " + (targetMobs ? "любые живые существа" : "только игроки")));
+                        "SP Trigger: цель = " + (targetMobs ? "любые живые существа" : "только игроки")));
                     return Command.SINGLE_SUCCESS;
                 }))));
     }
 
-    /** Жёсткая блокировка: только встроенный сервер, ровно один игрок, LAN закрыт. */
-    private static boolean singleplayerOnly(Minecraft mc) {
-        return true;
-    }
-
-    private void releaseJump(Minecraft mc) {
-        if (jumpHeld) {
-            mc.options.keyJump.setDown(false);
-            jumpHeld = false;
-        }
-    }
-
     private void resetState() {
-        jumpDelay = -1;
         hitDelay = -1;
         missPlanned = false;
     }
 
-    private Entity aimedTarget(Minecraft mc) {
+    private Entity aimedTarget(MinecraftClient mc) {
+        // Проверяем, куда смотрит игрок
         HitResult hit = mc.hitResult;
         if (!(hit instanceof EntityHitResult ehr)) {
             return null;
         }
         Entity e = ehr.getEntity();
+        
+        // Не бьем себя и мертвых
         if (e == mc.player || !e.isAlive()) {
             return null;
         }
+        
+        // Фильтр по мобам/игрокам
         if (targetMobs) {
             return e instanceof LivingEntity ? e : null;
         }
         return e instanceof Player ? e : null;
     }
 
-    private static boolean canCrit(LocalPlayer p) {
-        return p.fallDistance > 0
-            && !p.onGround()
-            && !p.onClimbable()
-            && !p.isInWater()
-            && !p.hasEffect(MobEffects.BLINDNESS)
-            && !p.isPassenger();
-    }
-
-    private void tick(Minecraft mc) {
-        // Отпускаем прыжок, нажатый в прошлом тике.
-        releaseJump(mc);
-
-        LocalPlayer player = mc.player;
-        if (!enabled || player == null || mc.level == null || mc.gameMode == null
-            || mc.screen != null || !singleplayerOnly(mc)) {
+    private void tick(MinecraftClient mc) {
+        // Если игрок не в игре или мод выключен - сбрасываем состояние
+        if (!enabled || mc.player == null || mc.level == null || mc.screen != null) {
             resetState();
             return;
         }
 
+        // Ищем цель
         Entity target = aimedTarget(mc);
         if (target == null) {
             resetState();
             return;
         }
 
+        // ПРОВЕРКА ДИСТАНЦИИ: не бьем, если цель слишком далеко (больше 3.2 блоков)
+        if (mc.player.distanceTo(target) > 3.2f) {
+            return;
+        }
+
+        // ПРОВЕРКА КУЛДАУНА: ждем, пока шкала атаки заполнится хотя бы на 90%
+        if (mc.player.getAttackStrengthScale(0.5f) < 0.9f) {
+            return;
+        }
+
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
-        if (player.onGround()) {
-            hitDelay = -1;
-            if (player.isInWater() || player.isPassenger()) {
-                return;
-            }
-            if (jumpDelay < 0) {
-                jumpDelay = rnd.nextInt(MAX_JUMP_DELAY + 1);
-            }
-            if (jumpDelay > 0) {
-                jumpDelay--;
-                return;
-            }
-            mc.options.keyJump.setDown(true);
-            jumpHeld = true;
-            jumpDelay = -1;
-            return;
-        }
-
-        // В воздухе: бьём только при полном КД и когда удар будет критическим (падение).
-        jumpDelay = -1;
-        if (!canCrit(player) || player.getAttackStrengthScale(0.5F) < 1.0F) {
-            return;
-        }
-
+        // ЛОГИКА ЗАДЕРЖКИ ПЕРЕД УДАРОМ
         if (hitDelay < 0) {
+            // Если задержки нет, генерируем новую (от 1 до MAX_HIT_DELAY тиков)
             hitDelay = rnd.nextInt(MAX_HIT_DELAY + 1);
-            missPlanned = rnd.nextDouble() < MISS_CHANCE;
+            missPlanned = rnd.nextDouble() < MISS_CHANCE; // Решаем, будет ли промах
         }
+
         if (hitDelay > 0) {
             hitDelay--;
-            return;
+            return; // Ждем окончания задержки
         }
 
+        // ЛОГИКА УДАРА
         if (missPlanned) {
-            // Промах как в ваниле: взмах в пустоту + сброс КД.
-            player.swing(InteractionHand.MAIN_HAND);
-            player.resetAttackStrengthTicker();
+            // Промах: машем рукой в пустоту
+            mc.player.swing(InteractionHand.MAIN_HAND);
+            mc.player.resetAttackStrengthTicker();
         } else {
-            // Крит в ваниле невозможен во время спринта.
-            if (player.isSprinting()) {
-                player.setSprinting(false);
+            // Удар: сбрасываем спринт для крита, если нужно
+            if (mc.player.isSprinting()) {
+                mc.player.setSprinting(false);
             }
-            mc.gameMode.attack(player, target);
-            player.swing(InteractionHand.MAIN_HAND);
+            // БЬЕМ!
+            mc.gameMode.attack(mc.player, target);
+            mc.player.swing(InteractionHand.MAIN_HAND);
         }
+
+        // Сбрасываем таймеры после удара
         hitDelay = -1;
         missPlanned = false;
     }
