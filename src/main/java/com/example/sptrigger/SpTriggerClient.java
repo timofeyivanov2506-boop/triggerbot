@@ -6,8 +6,8 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.network.ClientPlayerEntity; // Если ошибка - замени на LocalPlayer
+import net.minecraft.client.Minecraft; // ИСПРАВЛЕНО: было MinecraftClient
+import net.minecraft.client.player.LocalPlayer; // ИСПРАВЛЕНО: было ClientPlayerEntity
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
@@ -37,7 +37,7 @@ public class SpTriggerClient implements ClientModInitializer {
                 .executes(ctx -> {
                     enabled = !enabled;
                     ctx.getSource().sendFeedback(Component.literal(
-                        "SP Trigger: " + (enabled ? "ВКЛ" : "ВЫКЛ"))); // Убрал упоминание одиночной игры
+                        "SP Trigger: " + (enabled ? "ВКЛ" : "ВЫКЛ"))); 
                     return Command.SINGLE_SUCCESS;
                 })
                 .then(ClientCommandManager.literal("mobs").executes(ctx -> {
@@ -53,7 +53,7 @@ public class SpTriggerClient implements ClientModInitializer {
         missPlanned = false;
     }
 
-    private Entity aimedTarget(MinecraftClient mc) {
+    private Entity aimedTarget(Minecraft mc) { // ИСПРАВЛЕНО: Minecraft
         // Проверяем, куда смотрит игрок
         HitResult hit = mc.hitResult;
         if (!(hit instanceof EntityHitResult ehr)) {
@@ -73,7 +73,7 @@ public class SpTriggerClient implements ClientModInitializer {
         return e instanceof Player ? e : null;
     }
 
-    private void tick(MinecraftClient mc) {
+    private void tick(Minecraft mc) { // ИСПРАВЛЕНО: Minecraft
         // Если игрок не в игре или мод выключен - сбрасываем состояние
         if (!enabled || mc.player == null || mc.level == null || mc.screen != null) {
             resetState();
@@ -121,7 +121,7 @@ public class SpTriggerClient implements ClientModInitializer {
             if (mc.player.isSprinting()) {
                 mc.player.setSprinting(false);
             }
-            // БЬЕМ!
+            // БЬЕМ! (В Mojmap это gameMode, а не interactionManager)
             mc.gameMode.attack(mc.player, target);
             mc.player.swing(InteractionHand.MAIN_HAND);
         }
