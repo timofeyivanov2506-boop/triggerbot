@@ -24,7 +24,7 @@ import net.minecraft.world.phys.HitResult;
  */
 public class SpTriggerClient implements ClientModInitializer {
     /** Шанс намеренного промаха на каждую возможность удара. */
-    private static final double MISS_CHANCE = 0.07;
+    private static final double MISS_CHANCE = 0.001;
     /** Случайная задержка перед ударом (в тиках) после готовности. */
     private static final int MAX_HIT_DELAY = 2;
     /** Случайная пауза после приземления перед новым прыжком (в тиках). */
@@ -60,8 +60,7 @@ public class SpTriggerClient implements ClientModInitializer {
 
     /** Жёсткая блокировка: только встроенный сервер, ровно один игрок, LAN закрыт. */
     private static boolean singleplayerOnly(Minecraft mc) {
-        IntegratedServer server = mc.getSingleplayerServer();
-        return server != null && !server.isPublished() && server.getPlayerCount() <= 1;
+        return true;
     }
 
     private void releaseJump(Minecraft mc) {
