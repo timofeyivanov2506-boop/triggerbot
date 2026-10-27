@@ -5,129 +5,179 @@ import java.util.concurrent.ThreadLocalRandom;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.minecraft.client.Minecraft; // ИСПРАВЛЕНО: было MinecraftClient
-import net.minecraft.client.player.LocalPlayer; // ИСПРАВЛЕНО: было ClientPlayerEntity
+import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.phys.EntityHitResult;
-import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.util.Mth;
 
 public class SpTriggerClient implements ClientModInitializer {
-    /** Шанс намеренного промаха на каждую возможность удара. */
-    private static final double MISS_CHANCE = 0.01; 
-    /** Случайная задержка перед ударом (в тиках) после готовности. */
+    private static final double MISS_CHANCE = 0.01;
     private static final int MAX_HIT_DELAY = 2;
-
+    private static final double MAX_REACH = 3.5;
+    private static final float AIM_SPEED = 0.3f;
+    
     private boolean enabled = false;
-    private boolean targetMobs = false;
+    private boolean targetMobs = true; // Бьет и мобов, и игроков
 
     private int hitDelay = -1;
     private boolean missPlanned = false;
+    private boolean jumpHeld = false;
 
     @Override
     public void onInitializeClient() {
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
 
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
-            dispatcher.register(ClientCommandManager.literal("sptrg")
-                .executes(ctx -> {
-                    enabled = !enabled;
-                    ctx.getSource().sendFeedback(Component.literal(
-                        "SP Trigger: " + (enabled ? "ВКЛ" : "ВЫКЛ"))); 
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            dispatcher.register(ClientCommandManager.literal("trigger")
+                // Команда /trigger on
+                .then(ClientCommandManager.literal("on").executes(ctx -> {
+                    enabled = true;
+                    ctx.getSource().sendFeedback(Component.literal("§aSP Trigger: ВКЛЮЧЕН"));
                     return Command.SINGLE_SUCCESS;
-                })
-                .then(ClientCommandManager.literal("mobs").executes(ctx -> {
-                    targetMobs = !targetMobs;
-                    ctx.getSource().sendFeedback(Component.literal(
-                        "SP Trigger: цель = " + (targetMobs ? "любые живые существа" : "только игроки")));
+                }))
+                // Команда /trigger off
+                .then(ClientCommandManager.literal("off").executes(ctx -> {
+                    enabled = false;
+                    resetState(); // Сбрасываем прыжки/задержки при выключении
+                    ctx.getSource().sendFeedback(Component.literal("§cSP Trigger: ВЫКЛЮЧЕН"));
                     return Command.SINGLE_SUCCESS;
-                }))));
+                }))
+                // Команда /trigger status
+                .then(ClientCommandManager.literal("status").executes(ctx -> {
+                    sendStatus(ctx.getSource());
+                    return Command.SINGLE_SUCCESS;
+                }))
+            );
+        });
+    }
+
+    private void sendStatus(FabricClientCommandSource source) {
+        String status = enabled ? "§aВКЛ" : "§cВЫКЛ";
+        String mode = targetMobs ? "§bМобы + Игроки" : "§bТолько Игроки";
+        
+        source.sendFeedback(Component.literal("§6=== SP Trigger Status ==="));
+        source.sendFeedback(Component.literal("§fСтатус: " + status));
+        source.sendFeedback(Component.literal("§fЦели: " + mode));
+        source.sendFeedback(Component.literal("§fРадиус: " + MAX_REACH + " блоков"));
     }
 
     private void resetState() {
         hitDelay = -1;
         missPlanned = false;
+        if (jumpHeld) {
+            Minecraft.getInstance().options.keyJump.setDown(false);
+            jumpHeld = false;
+        }
     }
 
-    private Entity aimedTarget(Minecraft mc) { // ИСПРАВЛЕНО: Minecraft
-        // Проверяем, куда смотрит игрок
-        HitResult hit = mc.hitResult;
-        if (!(hit instanceof EntityHitResult ehr)) {
-            return null;
+    private Entity findTarget(Minecraft mc) {
+        Entity bestTarget = null;
+        double closestDist = MAX_REACH;
+        Vec3 eyePos = mc.player.getEyePosition();
+        Vec3 lookVec = mc.player.getLookAngle();
+
+        for (Entity e : mc.level.entitiesForRendering()) {
+            if (e == mc.player || !e.isAlive()) continue;
+            
+            if (targetMobs) {
+                if (!(e instanceof LivingEntity)) continue;
+            } else {
+                if (!(e instanceof Player)) continue;
+            }
+
+            double dist = mc.player.distanceTo(e);
+            if (dist > MAX_REACH) continue;
+
+            Vec3 targetPos = e.getBoundingBox().getCenter();
+            Vec3 dirToTarget = targetPos.subtract(eyePos).normalize();
+            double dot = lookVec.dot(dirToTarget);
+
+            if (dot > 0.5 && dist < closestDist) {
+                closestDist = dist;
+                bestTarget = e;
+            }
         }
-        Entity e = ehr.getEntity();
-        
-        // Не бьем себя и мертвых
-        if (e == mc.player || !e.isAlive()) {
-            return null;
-        }
-        
-        // Фильтр по мобам/игрокам
-        if (targetMobs) {
-            return e instanceof LivingEntity ? e : null;
-        }
-        return e instanceof Player ? e : null;
+        return bestTarget;
     }
 
-    private void tick(Minecraft mc) { // ИСПРАВЛЕНО: Minecraft
-        // Если игрок не в игре или мод выключен - сбрасываем состояние
+    private void aimAt(Minecraft mc, Entity target) {
+        Vec3 eyePos = mc.player.getEyePosition();
+        Vec3 targetPos = target.getBoundingBox().getCenter();
+        Vec3 diff = targetPos.subtract(eyePos);
+
+        float targetYaw = (float) (Math.atan2(diff.z, diff.x) * (180.0 / Math.PI)) - 90.0f;
+        float targetPitch = (float) -(Math.atan2(diff.y, Math.sqrt(diff.x * diff.x + diff.z * diff.z)) * (180.0 / Math.PI));
+
+        float yawDiff = Mth.wrapDegrees(targetYaw - mc.player.getYRot());
+        float pitchDiff = Mth.wrapDegrees(targetPitch - mc.player.getXRot());
+
+        float newYaw = mc.player.getYRot() + yawDiff * AIM_SPEED;
+        float newPitch = mc.player.getXRot() + pitchDiff * AIM_SPEED;
+
+        newPitch = Mth.clamp(newPitch, -90.0f, 90.0f);
+
+        mc.player.setYRot(newYaw);
+        mc.player.setXRot(newPitch);
+    }
+
+    private void tick(Minecraft mc) {
         if (!enabled || mc.player == null || mc.level == null || mc.screen != null) {
             resetState();
             return;
         }
 
-        // Ищем цель
-        Entity target = aimedTarget(mc);
+        Entity target = findTarget(mc);
         if (target == null) {
             resetState();
             return;
         }
 
-        // ПРОВЕРКА ДИСТАНЦИИ: не бьем, если цель слишком далеко (больше 3.2 блоков)
-        if (mc.player.distanceTo(target) > 3.2f) {
-            return;
-        }
+        aimAt(mc, target);
 
-        // ПРОВЕРКА КУЛДАУНА: ждем, пока шкала атаки заполнится хотя бы на 90%
         if (mc.player.getAttackStrengthScale(0.5f) < 0.9f) {
             return;
         }
 
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
-        // ЛОГИКА ЗАДЕРЖКИ ПЕРЕД УДАРОМ
         if (hitDelay < 0) {
-            // Если задержки нет, генерируем новую (от 1 до MAX_HIT_DELAY тиков)
             hitDelay = rnd.nextInt(MAX_HIT_DELAY + 1);
-            missPlanned = rnd.nextDouble() < MISS_CHANCE; // Решаем, будет ли промах
+            missPlanned = rnd.nextDouble() < MISS_CHANCE;
         }
 
         if (hitDelay > 0) {
             hitDelay--;
-            return; // Ждем окончания задержки
+            return;
         }
 
-        // ЛОГИКА УДАРА
-        if (missPlanned) {
-            // Промах: машем рукой в пустоту
-            mc.player.swing(InteractionHand.MAIN_HAND);
-            mc.player.resetAttackStrengthTicker();
-        } else {
-            // Удар: сбрасываем спринт для крита, если нужно
-            if (mc.player.isSprinting()) {
-                mc.player.setSprinting(false);
+        if (mc.player.onGround() && !jumpHeld) {
+            mc.options.keyJump.setDown(true);
+            jumpHeld = true;
+        } 
+        else if (!mc.player.onGround() && mc.player.fallDistance > 0.0f) {
+            if (missPlanned) {
+                mc.player.swing(InteractionHand.MAIN_HAND);
+                mc.player.resetAttackStrengthTicker();
+            } else {
+                if (mc.player.isSprinting()) {
+                    mc.player.setSprinting(false);
+                }
+                mc.gameMode.attack(mc.player, target);
+                mc.player.swing(InteractionHand.MAIN_HAND);
+                
+                if (jumpHeld) {
+                    mc.options.keyJump.setDown(false);
+                    jumpHeld = false;
+                }
             }
-            // БЬЕМ! (В Mojmap это gameMode, а не interactionManager)
-            mc.gameMode.attack(mc.player, target);
-            mc.player.swing(InteractionHand.MAIN_HAND);
+            hitDelay = -1;
+            missPlanned = false;
         }
-
-        // Сбрасываем таймеры после удара
-        hitDelay = -1;
-        missPlanned = false;
     }
 }
