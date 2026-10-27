@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "sptrigger",
+  "version": "${version}",
+  "name": "SP Trigger Test",
+  "description": "Тестовый триггербот для ОДИНОЧНОГО мира: прыжок + удар с критом при наведении на цель. На серверах не работает.",
+  "authors": ["you"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["com.example.sptrigger.SpTriggerClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.1",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
