@@ -18,15 +18,12 @@ import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
-import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
-import net.minecraft.world.phys.Vec3;
 import org.lwjgl.glfw.GLFW;
 
 /**
@@ -37,12 +34,9 @@ public class SpTriggerClient implements ClientModInitializer {
     private static final double MISS_CHANCE = 0.15;
     private static final int BASE_HIT_DELAY = 2;
     private static final float SERVER_COOLDOWN = 0.92f;
-    private static final double MAX_REACH = 3.3;
-    private static final double FOV_DOT = 0.707;
-
-    private static final float AIM_SPEED_1 = 0.30f;
-    private static final float AIM_SPEED_2 = 0.28f;
-    private static final float AIM_THRESHOLD = 15.0f;
+    
+    // Строгая ванильная дистанция
+    private static final double MAX_REACH = 3.0; 
 
     private boolean enabled = false;
     private boolean targetMobs = true;
@@ -63,7 +57,6 @@ public class SpTriggerClient implements ClientModInitializer {
         ));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
-
         HudRenderCallback.EVENT.register(this::renderHud);
 
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
@@ -103,6 +96,7 @@ public class SpTriggerClient implements ClientModInitializer {
         source.sendFeedback(Component.literal("§6=== Ghost Trigger Status ==="));
         source.sendFeedback(Component.literal("§fСтатус: " + status));
         source.sendFeedback(Component.literal("§fДрузей в списке: §b" + friends.size()));
+        source.sendFeedback(Component.literal("§fReach: §b" + MAX_REACH + " блоков (строгий)"));
     }
 
     private void resetState() {
@@ -112,82 +106,25 @@ public class SpTriggerClient implements ClientModInitializer {
     }
 
     private Entity findTarget(Minecraft mc) {
-        Entity bestTarget = null;
-        double closestDist = MAX_REACH;
-        Vec3 eyePos = mc.player.getEyePosition();
-        Vec3 lookVec = mc.player.getLookAngle();
-
-        for (Entity e : mc.level.entitiesForRendering()) {
-            if (e == mc.player || !e.isAlive()) continue;
-
-            if (e instanceof Player p && friends.contains(p.getName().getString())) continue;
-
-            if (targetMobs) {
-                if (!(e instanceof LivingEntity)) continue;
-            } else {
-                if (!(e instanceof Player)) continue;
-            }
-
-            double dist = mc.player.distanceTo(e);
-            if (dist > MAX_REACH) continue;
-
-            Vec3 targetPos = e.getBoundingBox().getCenter();
-            Vec3 dirToTarget = targetPos.subtract(eyePos).normalize();
-            double dot = lookVec.dot(dirToTarget);
-
-            if (dot > FOV_DOT && dist < closestDist) {
-                BlockHitResult hit = mc.level.clip(new ClipContext(eyePos, targetPos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mc.player));
-                if (hit.getType() == HitResult.Type.BLOCK) continue;
-
-                closestDist = dist;
-                bestTarget = e;
-            }
+        HitResult hitResult = mc.hitResult;
+        if (!(hitResult instanceof EntityHitResult ehr)) {
+            return null;
         }
-        return bestTarget;
-    }
+        
+        Entity e = ehr.getEntity();
+        
+        if (e == mc.player || !e.isAlive()) return null;
+        
+        // СТРОГАЯ ПРОВЕРКА ДИСТАНЦИИ: если дальше 3.0 блоков - не бьем
+        if (mc.player.distanceTo(e) > MAX_REACH) return null;
 
-    private void aimAt(Minecraft mc, Entity target) {
-        Vec3 eyePos = mc.player.getEyePosition();
-        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        if (e instanceof Player p && friends.contains(p.getName().getString())) return null;
 
-        double width = target.getBoundingBox().getXsize();
-        double height = target.getBoundingBox().getYsize();
-        double randomX = target.getX() + (rnd.nextDouble() * width);
-        double randomY = target.getY() + (rnd.nextDouble() * height);
-        double randomZ = target.getZ() + (rnd.nextDouble() * width);
-
-        Vec3 targetVel = target.getDeltaMovement();
-        double speed = targetVel.length();
-        Vec3 targetPos = new Vec3(randomX, randomY, randomZ);
-        if (speed > 0.01) {
-             targetPos = targetPos.add(targetVel.scale(1.2));
+        if (targetMobs) {
+            return e instanceof LivingEntity ? e : null;
+        } else {
+            return e instanceof Player ? e : null;
         }
-
-        Vec3 diff = targetPos.subtract(eyePos);
-        float targetYaw = (float) (Math.atan2(diff.z, diff.x) * (180.0 / Math.PI)) - 90.0f;
-        float targetPitch = (float) -(Math.atan2(diff.y, Math.sqrt(diff.x * diff.x + diff.z * diff.z)) * (180.0 / Math.PI));
-
-        float yawDiff = Mth.wrapDegrees(targetYaw - mc.player.getYRot());
-        float pitchDiff = Mth.wrapDegrees(targetPitch - mc.player.getXRot());
-
-        float currentSpeed = (Math.abs(yawDiff) > AIM_THRESHOLD || Math.abs(pitchDiff) > AIM_THRESHOLD) ? AIM_SPEED_1 : AIM_SPEED_2;
-
-        if (missPlanned) {
-            yawDiff += (float) ((rnd.nextDouble() - 0.5) * 6.0f);
-            pitchDiff += (float) ((rnd.nextDouble() - 0.5) * 6.0f);
-        }
-
-        float newYaw = mc.player.getYRot() + yawDiff * currentSpeed;
-        float newPitch = mc.player.getXRot() + pitchDiff * currentSpeed;
-
-        if (rnd.nextFloat() < 0.3f) {
-            newYaw += (rnd.nextFloat() - 0.5f) * 0.3f;
-            newPitch += (rnd.nextFloat() - 0.5f) * 0.3f;
-        }
-
-        newPitch = Mth.clamp(newPitch, -90.0f, 90.0f);
-        mc.player.setYRot(newYaw);
-        mc.player.setXRot(newPitch);
     }
 
     private void tick(Minecraft mc) {
@@ -212,20 +149,16 @@ public class SpTriggerClient implements ClientModInitializer {
             return;
         }
 
-        aimAt(mc, target);
-
-        int ping = 0;
-        if (mc.getConnection() != null && mc.getConnection().getPlayerInfo(mc.player.getUUID()) != null) {
-            ping = mc.getConnection().getPlayerInfo(mc.player.getUUID()).getLatency();
-        }
-        int pingTicks = ping / 50;
-        int actualDelay = BASE_HIT_DELAY + Math.min(pingTicks, 3);
-
         if (mc.player.getAttackStrengthScale(0.5f) < SERVER_COOLDOWN) {
             return;
         }
 
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        int ping = 0;
+        if (mc.getConnection() != null && mc.getConnection().getPlayerInfo(mc.player.getUUID()) != null) {
+            ping = mc.getConnection().getPlayerInfo(mc.player.getUUID()).getLatency();
+        }
+        int actualDelay = BASE_HIT_DELAY + Math.min(ping / 50, 3);
 
         if (hitDelay < 0) {
             hitDelay = rnd.nextInt(actualDelay + 1);
@@ -256,7 +189,6 @@ public class SpTriggerClient implements ClientModInitializer {
         }
     }
 
-    // ИСПРАВЛЕНО: DeltaTracker вместо float
     private void renderHud(GuiGraphics graphics, DeltaTracker deltaTracker) {
         Minecraft mc = Minecraft.getInstance();
         if (!enabled || currentTarget == null || mc.player == null || mc.screen != null) return;
