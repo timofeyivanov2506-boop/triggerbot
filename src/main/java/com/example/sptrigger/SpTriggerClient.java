@@ -2,6 +2,8 @@ package com.example.sptrigger;
 
 import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.brigadier.Command;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
@@ -9,41 +11,47 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallba
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.glfw.GLFW;
 
 /**
  * Разработчик: selyavi
- * Описание: Бесплатный Ghost TriggerBot с открытым исходным кодом.
+ * Описание: Ghost TriggerBot (Delta-Style Edition)
  */
 public class SpTriggerClient implements ClientModInitializer {
-    // --- Настройки Ghost-режима ---
-    private static final double MISS_CHANCE = 0.15;      // 15% шанс промаха
-    private static final int MAX_HIT_DELAY = 4;          // Задержка между ударами (тики)
-    private static final double MAX_REACH = 3.3;         // Чуть меньше ванильного радиуса (3.0), чтобы не палить
-    private static final float AIM_SPEED = 0.08f;        // ОЧЕНЬ плавная наводка
-    private static final float SHAKE_INTENSITY = 0.4f;   // Сила дрожания мыши
+    private static final double MISS_CHANCE = 0.15;
+    private static final int BASE_HIT_DELAY = 2;
+    private static final float SERVER_COOLDOWN = 0.92f;
+    private static final double MAX_REACH = 3.3;
+    private static final double FOV_DOT = 0.707; 
     
-    // Задержка реакции перед первым ударом (в тиках: 3-6 = 150-300мс)
-    private static final int MIN_REACTION = 3;
-    private static final int MAX_REACTION = 6;
+    // Aim Assist
+    private static final float AIM_SPEED_1 = 0.30f;
+    private static final float AIM_SPEED_2 = 0.28f;
+    private static final float AIM_THRESHOLD = 15.0f;
 
     private boolean enabled = false;
     private boolean targetMobs = true;
-
     private int hitDelay = -1;
-    private int reactionTimer = -1;
     private boolean missPlanned = false;
-    private boolean jumpHeld = false;
     private KeyMapping toggleKey;
+    
+    // Friend System
+    private final List<String> friends = new ArrayList<>();
+    private Entity currentTarget = null;
 
     @Override
     public void onInitializeClient() {
@@ -55,6 +63,9 @@ public class SpTriggerClient implements ClientModInitializer {
         ));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
+        
+        // Регистрация HUD (отрисовка инфы на экране)
+        HudRenderCallback.EVENT.register(this::renderHud);
 
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("trigger")
@@ -73,29 +84,33 @@ public class SpTriggerClient implements ClientModInitializer {
                     sendStatus(ctx.getSource());
                     return Command.SINGLE_SUCCESS;
                 }))
+                // ДОБАВЛЕНО: Система друзей
+                .then(ClientCommandManager.literal("friend").then(ClientCommandManager.argument("name", com.mojang.brigadier.arguments.StringArgumentType.string()).executes(ctx -> {
+                    String name = com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "name");
+                    if (friends.contains(name)) {
+                        friends.remove(name);
+                        ctx.getSource().sendFeedback(Component.literal("§cУдален из друзей: " + name));
+                    } else {
+                        friends.add(name);
+                        ctx.getSource().sendFeedback(Component.literal("§aДобавлен в друзья: " + name));
+                    }
+                    return Command.SINGLE_SUCCESS;
+                })))
             );
         });
     }
 
     private void sendStatus(FabricClientCommandSource source) {
         String status = enabled ? "§aВКЛ" : "§cВЫКЛ";
-        String mode = targetMobs ? "§bМобы + Игроки" : "§bТолько Игроки";
-
         source.sendFeedback(Component.literal("§6=== Ghost Trigger Status ==="));
         source.sendFeedback(Component.literal("§fСтатус: " + status));
-        source.sendFeedback(Component.literal("§fЦели: " + mode));
-        source.sendFeedback(Component.literal("§fРадиус: " + MAX_REACH + " блоков"));
-        source.sendFeedback(Component.literal("§fGhost Mode: §aВКЛ (Рандом + Дрожание)"));
+        source.sendFeedback(Component.literal("§fДрузей в списке: §b" + friends.size()));
     }
 
     private void resetState() {
         hitDelay = -1;
-        reactionTimer = -1;
         missPlanned = false;
-        if (jumpHeld) {
-            Minecraft.getInstance().options.keyJump.setDown(false);
-            jumpHeld = false;
-        }
+        currentTarget = null;
     }
 
     private Entity findTarget(Minecraft mc) {
@@ -106,6 +121,9 @@ public class SpTriggerClient implements ClientModInitializer {
 
         for (Entity e : mc.level.entitiesForRendering()) {
             if (e == mc.player || !e.isAlive()) continue;
+            
+            // Проверка на друга
+            if (e instanceof Player p && friends.contains(p.getGameProfile().getName())) continue;
 
             if (targetMobs) {
                 if (!(e instanceof LivingEntity)) continue;
@@ -120,7 +138,10 @@ public class SpTriggerClient implements ClientModInitializer {
             Vec3 dirToTarget = targetPos.subtract(eyePos).normalize();
             double dot = lookVec.dot(dirToTarget);
 
-            if (dot > 0.5 && dist < closestDist) {
+            if (dot > FOV_DOT && dist < closestDist) {
+                BlockHitResult hit = mc.level.clip(new ClipContext(eyePos, targetPos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mc.player));
+                if (hit.getType() == HitResult.Type.BLOCK) continue;
+
                 closestDist = dist;
                 bestTarget = e;
             }
@@ -130,28 +151,47 @@ public class SpTriggerClient implements ClientModInitializer {
 
     private void aimAt(Minecraft mc, Entity target) {
         Vec3 eyePos = mc.player.getEyePosition();
-        Vec3 targetPos = target.getBoundingBox().getCenter();
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        
+        // Random Aim Point
+        double width = target.getBoundingBox().getXsize();
+        double height = target.getBoundingBox().getYsize();
+        double randomX = target.getX() + (rnd.nextDouble() * width);
+        double randomY = target.getY() + (rnd.nextDouble() * height);
+        double randomZ = target.getZ() + (rnd.nextDouble() * width);
+        
+        // Velocity Check: Только если цель движется
+        Vec3 targetVel = target.getDeltaMovement();
+        double speed = targetVel.length();
+        Vec3 targetPos = new Vec3(randomX, randomY, randomZ);
+        if (speed > 0.01) {
+             targetPos = targetPos.add(targetVel.scale(1.2));
+        }
+        
         Vec3 diff = targetPos.subtract(eyePos);
-
         float targetYaw = (float) (Math.atan2(diff.z, diff.x) * (180.0 / Math.PI)) - 90.0f;
         float targetPitch = (float) -(Math.atan2(diff.y, Math.sqrt(diff.x * diff.x + diff.z * diff.z)) * (180.0 / Math.PI));
 
         float yawDiff = Mth.wrapDegrees(targetYaw - mc.player.getYRot());
         float pitchDiff = Mth.wrapDegrees(targetPitch - mc.player.getXRot());
 
-        // Плавный доворот
-        float newYaw = mc.player.getYRot() + yawDiff * AIM_SPEED;
-        float newPitch = mc.player.getXRot() + pitchDiff * AIM_SPEED;
+        float currentSpeed = (Math.abs(yawDiff) > AIM_THRESHOLD || Math.abs(pitchDiff) > AIM_THRESHOLD) ? AIM_SPEED_1 : AIM_SPEED_2;
+        
+        // Humanized Miss: Если запланирован промах, целимся чуть в сторону
+        if (missPlanned) {
+            yawDiff += (float) ((rnd.nextDouble() - 0.5) * 6.0f);
+            pitchDiff += (float) ((rnd.nextDouble() - 0.5) * 6.0f);
+        }
 
-        // ДРОЖАНИЕ МЫШИ (имитация руки человека)
-        ThreadLocalRandom rnd = ThreadLocalRandom.current();
-        if (rnd.nextFloat() < 0.3f) { // Дрожит не каждый тик, а иногда
-            newYaw += (rnd.nextFloat() - 0.5f) * SHAKE_INTENSITY;
-            newPitch += (rnd.nextFloat() - 0.5f) * SHAKE_INTENSITY;
+        float newYaw = mc.player.getYRot() + yawDiff * currentSpeed;
+        float newPitch = mc.player.getXRot() + pitchDiff * currentSpeed;
+
+        if (rnd.nextFloat() < 0.3f) {
+            newYaw += (rnd.nextFloat() - 0.5f) * 0.3f;
+            newPitch += (rnd.nextFloat() - 0.5f) * 0.3f;
         }
 
         newPitch = Mth.clamp(newPitch, -90.0f, 90.0f);
-
         mc.player.setYRot(newYaw);
         mc.player.setXRot(newPitch);
     }
@@ -171,34 +211,31 @@ public class SpTriggerClient implements ClientModInitializer {
         }
 
         Entity target = findTarget(mc);
+        currentTarget = target; 
+        
         if (target == null) {
             resetState();
             return;
         }
 
-        // Человеческая реакция перед первым ударом
-        if (reactionTimer < 0) {
-            reactionTimer = ThreadLocalRandom.current().nextInt(MIN_REACTION, MAX_REACTION + 1);
-            resetState(); // Сбрасываем хит-таймер, чтобы не ударить раньше времени
-        }
-
-        if (reactionTimer > 0) {
-            reactionTimer--;
-            aimAt(mc, target); // Пока "думаем", наводимся
-            return;
-        }
-
         aimAt(mc, target);
 
-        if (mc.player.getAttackStrengthScale(0.5f) < 0.9f) {
+        // Dynamic Ping Delay
+        int ping = 0;
+        if (mc.getConnection() != null && mc.getConnection().getPlayerInfo(mc.player.getUUID()) != null) {
+            ping = mc.getConnection().getPlayerInfo(mc.player.getUUID()).getLatency();
+        }
+        int pingTicks = ping / 50; // 50ms = 1 тик
+        int actualDelay = BASE_HIT_DELAY + Math.min(pingTicks, 3);
+
+        if (mc.player.getAttackStrengthScale(0.5f) < SERVER_COOLDOWN) {
             return;
         }
 
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
         if (hitDelay < 0) {
-            // Рандомная задержка между ударами
-            hitDelay = rnd.nextInt(MAX_HIT_DELAY + 1);
+            hitDelay = rnd.nextInt(actualDelay + 1);
             missPlanned = rnd.nextDouble() < MISS_CHANCE;
         }
 
@@ -207,15 +244,10 @@ public class SpTriggerClient implements ClientModInitializer {
             return;
         }
 
-        // ЛОГИКА ПРЫЖКА (с шансом на "лак"/ошибку тайминга)
-        if (mc.player.onGround() && !jumpHeld) {
-            // 10% шанс, что бот "проспит" момент и прыгнет чуть позже
-            if (rnd.nextFloat() < 0.1f && hitDelay != -1) return; 
-            
-            mc.options.keyJump.setDown(true);
-            jumpHeld = true;
-        }
-        else if (!mc.player.onGround() && mc.player.getDeltaMovement().y < 0.0) {
+        boolean isFalling = !mc.player.onGround() && mc.player.getDeltaMovement().y < 0.0;
+        boolean onGround = mc.player.onGround();
+
+        if (isFalling || onGround) {
             if (missPlanned) {
                 mc.player.swing(InteractionHand.MAIN_HAND);
                 mc.player.resetAttackStrengthTicker();
@@ -223,18 +255,33 @@ public class SpTriggerClient implements ClientModInitializer {
                 if (mc.player.isSprinting()) {
                     mc.player.setSprinting(false);
                 }
-
                 mc.gameMode.attack(mc.player, target);
                 mc.player.swing(InteractionHand.MAIN_HAND);
-
-                if (jumpHeld) {
-                    mc.options.keyJump.setDown(false);
-                    jumpHeld = false;
-                }
             }
             hitDelay = -1;
             missPlanned = false;
-            reactionTimer = -1; // Сбрасываем реакцию
         }
+    }
+
+    // --- TARGET HUD ---
+    private void renderHud(GuiGraphics graphics, float tickDelta) {
+        Minecraft mc = Minecraft.getInstance();
+        if (!enabled || currentTarget == null || mc.player == null || mc.screen != null) return;
+
+        int screenWidth = mc.getWindow().getGuiScaledWidth();
+        int screenHeight = mc.getWindow().getGuiScaledHeight();
+        
+        String name = currentTarget.getName().getString();
+        float health = 0;
+        if (currentTarget instanceof LivingEntity living) {
+            health = living.getHealth();
+        }
+
+        int x = screenWidth / 2 + 15;
+        int y = screenHeight / 2 + 15;
+        
+        graphics.fill(x - 2, y - 2, x + 100, y + 25, 0x80000000);
+        graphics.drawString(mc.font, "§cTarget: §f" + name, x, y, 0xFFFFFF);
+        graphics.drawString(mc.font, "§cHP: §f" + String.format("%.1f", health), x, y + 12, 0xFFFFFF);
     }
 }
