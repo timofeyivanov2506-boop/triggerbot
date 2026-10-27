@@ -7,6 +7,8 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.InteractionHand;
@@ -15,40 +17,49 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.util.Mth;
+import com.mojang.blaze3d.platform.InputConstants;
+import org.lwjgl.glfw.GLFW;
 
 public class SpTriggerClient implements ClientModInitializer {
     private static final double MISS_CHANCE = 0.01;
     private static final int MAX_HIT_DELAY = 2;
     private static final double MAX_REACH = 3.5;
-    private static final float AIM_SPEED = 0.3f;
+    // Чем меньше значение, тем плавнее наводка (0.15 = очень плавно, 0.5 = резко)
+    private static final float AIM_SPEED = 0.15f;
     
     private boolean enabled = false;
-    private boolean targetMobs = true; // Бьет и мобов, и игроков
+    private boolean targetMobs = true;
 
     private int hitDelay = -1;
     private boolean missPlanned = false;
     private boolean jumpHeld = false;
+    private KeyMapping toggleKey;
 
     @Override
     public void onInitializeClient() {
+        // Регистрируем клавишу R для включения/выключения
+        toggleKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
+            "key.sptrg.toggle",
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_R, // Кнопка R
+            "SP Trigger"
+        ));
+
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
 
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("trigger")
-                // Команда /trigger on
                 .then(ClientCommandManager.literal("on").executes(ctx -> {
                     enabled = true;
                     ctx.getSource().sendFeedback(Component.literal("§aSP Trigger: ВКЛЮЧЕН"));
                     return Command.SINGLE_SUCCESS;
                 }))
-                // Команда /trigger off
                 .then(ClientCommandManager.literal("off").executes(ctx -> {
                     enabled = false;
-                    resetState(); // Сбрасываем прыжки/задержки при выключении
+                    resetState();
                     ctx.getSource().sendFeedback(Component.literal("§cSP Trigger: ВЫКЛЮЧЕН"));
                     return Command.SINGLE_SUCCESS;
                 }))
-                // Команда /trigger status
                 .then(ClientCommandManager.literal("status").executes(ctx -> {
                     sendStatus(ctx.getSource());
                     return Command.SINGLE_SUCCESS;
@@ -98,6 +109,7 @@ public class SpTriggerClient implements ClientModInitializer {
             Vec3 dirToTarget = targetPos.subtract(eyePos).normalize();
             double dot = lookVec.dot(dirToTarget);
 
+            // Если цель в поле зрения (dot > 0.5) и ближе всех остальных - берем ее
             if (dot > 0.5 && dist < closestDist) {
                 closestDist = dist;
                 bestTarget = e;
@@ -117,6 +129,7 @@ public class SpTriggerClient implements ClientModInitializer {
         float yawDiff = Mth.wrapDegrees(targetYaw - mc.player.getYRot());
         float pitchDiff = Mth.wrapDegrees(targetPitch - mc.player.getXRot());
 
+        // Плавный доворот
         float newYaw = mc.player.getYRot() + yawDiff * AIM_SPEED;
         float newPitch = mc.player.getXRot() + pitchDiff * AIM_SPEED;
 
@@ -127,6 +140,15 @@ public class SpTriggerClient implements ClientModInitializer {
     }
 
     private void tick(Minecraft mc) {
+        // Проверка нажатия клавиши R
+        while (toggleKey.consumeClick()) {
+            enabled = !enabled;
+            if (!enabled) resetState();
+            if (mc.player != null) {
+                mc.player.sendSystemMessage(Component.literal("§6SP Trigger: " + (enabled ? "§aВКЛ" : "§cВЫКЛ")));
+            }
+        }
+
         if (!enabled || mc.player == null || mc.level == null || mc.screen != null) {
             resetState();
             return;
@@ -140,6 +162,7 @@ public class SpTriggerClient implements ClientModInitializer {
 
         aimAt(mc, target);
 
+        // Проверка кулдауна (90% готовности)
         if (mc.player.getAttackStrengthScale(0.5f) < 0.9f) {
             return;
         }
@@ -156,21 +179,26 @@ public class SpTriggerClient implements ClientModInitializer {
             return;
         }
 
+        // ЛОГИКА ПРЫЖКА
         if (mc.player.onGround() && !jumpHeld) {
             mc.options.keyJump.setDown(true);
             jumpHeld = true;
         } 
-        else if (!mc.player.onGround() && mc.player.fallDistance > 0.0f) {
+        // ЛОГИКА УДАРА (Бьем, когда падаем, для крита)
+        else if (!mc.player.onGround() && mc.player.getDeltaMovement().y < 0.0) {
             if (missPlanned) {
                 mc.player.swing(InteractionHand.MAIN_HAND);
                 mc.player.resetAttackStrengthTicker();
             } else {
                 if (mc.player.isSprinting()) {
-                    mc.player.setSprinting(false);
+                    mc.player.setSprinting(false); // Сброс спринта для крита
                 }
+                
+                // Сам удар
                 mc.gameMode.attack(mc.player, target);
                 mc.player.swing(InteractionHand.MAIN_HAND);
                 
+                // Отпускаем прыжок, чтобы не улететь в космос
                 if (jumpHeld) {
                     mc.options.keyJump.setDown(false);
                     jumpHeld = false;
