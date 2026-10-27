@@ -24,7 +24,7 @@ import net.minecraft.world.phys.HitResult;
  */
 public class SpTriggerClient implements ClientModInitializer {
     /** Шанс намеренного промаха на каждую возможность удара. */
-    private static final double MISS_CHANCE = 0.12;
+    private static final double MISS_CHANCE = 0.07;
     /** Случайная задержка перед ударом (в тиках) после готовности. */
     private static final int MAX_HIT_DELAY = 2;
     /** Случайная пауза после приземления перед новым прыжком (в тиках). */
