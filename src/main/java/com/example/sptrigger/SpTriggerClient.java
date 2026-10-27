@@ -22,30 +22,36 @@ import org.lwjgl.glfw.GLFW;
 
 /**
  * Разработчик: selyavi
- * Описание: Бесплатный TriggerBot с открытым исходным кодом.
+ * Описание: Бесплатный Ghost TriggerBot с открытым исходным кодом.
  */
 public class SpTriggerClient implements ClientModInitializer {
-    private static final double MISS_CHANCE = 0.01;
-    private static final int MAX_HIT_DELAY = 2;
-    private static final double MAX_REACH = 3.5;
-    private static final float AIM_SPEED = 0.15f;
+    // --- Настройки Ghost-режима ---
+    private static final double MISS_CHANCE = 0.15;      // 15% шанс промаха
+    private static final int MAX_HIT_DELAY = 4;          // Задержка между ударами (тики)
+    private static final double MAX_REACH = 3.3;         // Чуть меньше ванильного радиуса (3.0), чтобы не палить
+    private static final float AIM_SPEED = 0.08f;        // ОЧЕНЬ плавная наводка
+    private static final float SHAKE_INTENSITY = 0.4f;   // Сила дрожания мыши
+    
+    // Задержка реакции перед первым ударом (в тиках: 3-6 = 150-300мс)
+    private static final int MIN_REACTION = 3;
+    private static final int MAX_REACTION = 6;
 
     private boolean enabled = false;
     private boolean targetMobs = true;
 
     private int hitDelay = -1;
+    private int reactionTimer = -1;
     private boolean missPlanned = false;
     private boolean jumpHeld = false;
     private KeyMapping toggleKey;
 
     @Override
     public void onInitializeClient() {
-        // 1. Исправлено: категория теперь объект KeyMapping.Category
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
             "key.sptrg.toggle",
             InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_R,
-            KeyMapping.Category.MISC // Или KeyMapping.Category.GAMEPLAY
+            KeyMapping.Category.MISC
         ));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
@@ -54,13 +60,13 @@ public class SpTriggerClient implements ClientModInitializer {
             dispatcher.register(ClientCommandManager.literal("trigger")
                 .then(ClientCommandManager.literal("on").executes(ctx -> {
                     enabled = true;
-                    ctx.getSource().sendFeedback(Component.literal("§aSP Trigger: ВКЛЮЧЕН"));
+                    ctx.getSource().sendFeedback(Component.literal("§aGhost Trigger: ВКЛЮЧЕН"));
                     return Command.SINGLE_SUCCESS;
                 }))
                 .then(ClientCommandManager.literal("off").executes(ctx -> {
                     enabled = false;
                     resetState();
-                    ctx.getSource().sendFeedback(Component.literal("§cSP Trigger: ВЫКЛЮЧЕН"));
+                    ctx.getSource().sendFeedback(Component.literal("§cGhost Trigger: ВЫКЛЮЧЕН"));
                     return Command.SINGLE_SUCCESS;
                 }))
                 .then(ClientCommandManager.literal("status").executes(ctx -> {
@@ -75,14 +81,16 @@ public class SpTriggerClient implements ClientModInitializer {
         String status = enabled ? "§aВКЛ" : "§cВЫКЛ";
         String mode = targetMobs ? "§bМобы + Игроки" : "§bТолько Игроки";
 
-        source.sendFeedback(Component.literal("§6=== SP Trigger Status ==="));
+        source.sendFeedback(Component.literal("§6=== Ghost Trigger Status ==="));
         source.sendFeedback(Component.literal("§fСтатус: " + status));
         source.sendFeedback(Component.literal("§fЦели: " + mode));
         source.sendFeedback(Component.literal("§fРадиус: " + MAX_REACH + " блоков"));
+        source.sendFeedback(Component.literal("§fGhost Mode: §aВКЛ (Рандом + Дрожание)"));
     }
 
     private void resetState() {
         hitDelay = -1;
+        reactionTimer = -1;
         missPlanned = false;
         if (jumpHeld) {
             Minecraft.getInstance().options.keyJump.setDown(false);
@@ -131,8 +139,16 @@ public class SpTriggerClient implements ClientModInitializer {
         float yawDiff = Mth.wrapDegrees(targetYaw - mc.player.getYRot());
         float pitchDiff = Mth.wrapDegrees(targetPitch - mc.player.getXRot());
 
+        // Плавный доворот
         float newYaw = mc.player.getYRot() + yawDiff * AIM_SPEED;
         float newPitch = mc.player.getXRot() + pitchDiff * AIM_SPEED;
+
+        // ДРОЖАНИЕ МЫШИ (имитация руки человека)
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        if (rnd.nextFloat() < 0.3f) { // Дрожит не каждый тик, а иногда
+            newYaw += (rnd.nextFloat() - 0.5f) * SHAKE_INTENSITY;
+            newPitch += (rnd.nextFloat() - 0.5f) * SHAKE_INTENSITY;
+        }
 
         newPitch = Mth.clamp(newPitch, -90.0f, 90.0f);
 
@@ -145,8 +161,7 @@ public class SpTriggerClient implements ClientModInitializer {
             enabled = !enabled;
             if (!enabled) resetState();
             if (mc.player != null) {
-                // 2. Исправлено: sendSystemMessage -> displayClientMessage
-                mc.player.displayClientMessage(Component.literal("§6SP Trigger: " + (enabled ? "§aВКЛ" : "§cВЫКЛ")), false);
+                mc.player.displayClientMessage(Component.literal("§6Ghost Trigger: " + (enabled ? "§aВКЛ" : "§cВЫКЛ")), false);
             }
         }
 
@@ -161,6 +176,18 @@ public class SpTriggerClient implements ClientModInitializer {
             return;
         }
 
+        // Человеческая реакция перед первым ударом
+        if (reactionTimer < 0) {
+            reactionTimer = ThreadLocalRandom.current().nextInt(MIN_REACTION, MAX_REACTION + 1);
+            resetState(); // Сбрасываем хит-таймер, чтобы не ударить раньше времени
+        }
+
+        if (reactionTimer > 0) {
+            reactionTimer--;
+            aimAt(mc, target); // Пока "думаем", наводимся
+            return;
+        }
+
         aimAt(mc, target);
 
         if (mc.player.getAttackStrengthScale(0.5f) < 0.9f) {
@@ -170,6 +197,7 @@ public class SpTriggerClient implements ClientModInitializer {
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
         if (hitDelay < 0) {
+            // Рандомная задержка между ударами
             hitDelay = rnd.nextInt(MAX_HIT_DELAY + 1);
             missPlanned = rnd.nextDouble() < MISS_CHANCE;
         }
@@ -179,7 +207,11 @@ public class SpTriggerClient implements ClientModInitializer {
             return;
         }
 
+        // ЛОГИКА ПРЫЖКА (с шансом на "лак"/ошибку тайминга)
         if (mc.player.onGround() && !jumpHeld) {
+            // 10% шанс, что бот "проспит" момент и прыгнет чуть позже
+            if (rnd.nextFloat() < 0.1f && hitDelay != -1) return; 
+            
             mc.options.keyJump.setDown(true);
             jumpHeld = true;
         }
@@ -202,6 +234,7 @@ public class SpTriggerClient implements ClientModInitializer {
             }
             hitDelay = -1;
             missPlanned = false;
+            reactionTimer = -1; // Сбрасываем реакцию
         }
     }
 }
